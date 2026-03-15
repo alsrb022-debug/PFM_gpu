@@ -19,7 +19,7 @@ pss   = 1e-5
 
 [time]
 nstep = 20000
-nout  = 20000
+nout  = 2000
 
 [init]  # plane triple circle sphere neighbors voronoi
 type   = voronoi
