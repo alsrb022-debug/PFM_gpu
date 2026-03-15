@@ -1,0 +1,25 @@
+보르노이 (256nm, 256g, nmax=5, xi=3)
+CUDA enabled = True
+step =        0, time = 0.000000e+00, gpu_time = 2.257 s
+step =      100, time = 1.666667e-11, gpu_time = 9.176 s
+
+
+스피어 (r=100, 나머지 동일)
+CUDA enabled = True
+step =        0, time = 0.000000e+00, gpu_time = 2.214 s
+step =      100, time = 1.666667e-11, gpu_time = 7.274 s
+
+
+1. global memore read cache
+
+2. actvive gather 최적화
+
+3. pair loop vectorization
+
+4. bulk early exit 강화
+
+5. float32 계산
+
+6. shared memory stencil (복잡함)
+
+7. slot sort(정렬)

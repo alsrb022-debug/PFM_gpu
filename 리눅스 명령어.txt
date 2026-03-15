@@ -1,0 +1,68 @@
+pwd : 현재 위치 확인
+ls : 폴더 목록 보기 (-l : 자세히 보기, -a 숨김파일 보기, -la)
+cd : 폴더이동 (cd .. : 상위 폴더 이동, cd ~ : 홈으로 이동)
+mkdir name : name 폴더만듬
+mkdir -p pfm/src : pfm폴더 만들고 하위에 src 만듬
+touch name : 파일 만들기
+nvim name : 파일편집
+	i : 입력모드
+	esc : 명령모드
+	:w  : 저장
+	:q : 종료
+	:wq 저장 후 종료
+cat name :  파일 보기
+less name : 긴 파일 보기
+cp 원본 복사본 : 파일 복사
+cp -r folder newfolder : 폴더 복사
+mv name newname : 이름 변경
+rm 파일 : 삭제
+rm -r 폴더
+
+
+git status 
+
+mkdir pfm
+cd pfm
+git init
+mkdir src input output
+touch src/main.py
+nvim src/main.py
+
+Tab	자동완성
+↑	이전 명령
+Ctrl + r	명령 검색
+Ctrl + a	줄 맨 앞
+Ctrl + e	줄 맨 끝
+Ctrl + l	화면 정리
+
+편집기 명령어
+yy p 
+3yy p
+dd (삭제한 줄은 자동으로 복사상태)
+5dd
+
+Shift + v j y p
+yiw : 단어 복사
+\ : 줄 끝
+0 : 줄 시작
+kjhl : 방향키
+w b : 단어단위 이동
+cc : 줄 전체 삭제 후 입력
+u : 실행 취소 
+ctrl+r
+:q! 강제 종료
+
+vim 고급 기능 10개 (개발자 필수)
+
+grep -rn "phi" 코드 검색
+
+\\wsl$\Ubuntu\home\mingyu022 : 실제 윈도우 경로
+
+conda activate pfm
+
+https://github.com/alsrb022-debug/PFM_cpu.git
+git@github.com:alsrb022-debug/PFM_gpu.git
+ncs
+
+gg V G
+
