@@ -96,6 +96,8 @@ def build_solver_step_kernel(nmax_fixed):
     if not CUDA_OK:
         return None
 
+    rmax_fixed = nmax_fixed * 2   # 테스트용 R 최대 개수
+
     @cuda.jit
     def solver_step_kernel(
         phiO, phiN,
@@ -118,144 +120,271 @@ def build_solver_step_kernel(nmax_fixed):
         dy2 = dy * dy
         dz2 = dz * dz
 
-        act_id = cuda.local.array(nmax_fixed, int16)
+        # -----------------------------
+        # R / Q arrays
+        # -----------------------------
+        rid = cuda.local.array(rmax_fixed, int16)       # R phase ids
+        rsup = cuda.local.array(rmax_fixed, float32)    # support sum for each R
+        q_ridx = cuda.local.array(nmax_fixed, int16)    # Q is stored as index into R
 
-        phi_c_arr = cuda.local.array(nmax_fixed, float32)
-        lap = cuda.local.array(nmax_fixed, float32)
-        dF = cuda.local.array(nmax_fixed, float32)
-        rhs = cuda.local.array(nmax_fixed, float32)
-        phi_tmp = cuda.local.array(nmax_fixed, float32)
+        phi_c_r = cuda.local.array(rmax_fixed, float32)
+        lap_r   = cuda.local.array(rmax_fixed, float32)
+        dF_r    = cuda.local.array(rmax_fixed, float32)
 
-        S = 0
+        rhs_q    = cuda.local.array(nmax_fixed, float32)
+        phi_tmp_q = cuda.local.array(nmax_fixed, float32)
+
+        SR = 0
+        SQ = 0
+
+        for s in range(rmax_fixed):
+            rid[s] = -1
+            rsup[s] = 0.0
+            phi_c_r[s] = 0.0
+            lap_r[s] = 0.0
+            dF_r[s] = 0.0
 
         for s in range(nmax_fixed):
-            act_id[s] = -1
-            phi_c_arr[s] = 0.0
-            lap[s] = 0.0
-            dF[s] = 0.0
-            rhs[s] = 0.0
-            phi_tmp[s] = 0.0
+            q_ridx[s] = -1
+            rhs_q[s] = 0.0
+            phi_tmp_q[s] = 0.0
 
         # ----------------------------------------------------
-        # 0) active phase ids collection from self + 6 neighbors
+        # 0) build R from self + neighbors and accumulate support
+        #    current safe version:
+        #      - pid < 0 => skip
+        #      - val <= pss => skip
         # ----------------------------------------------------
+
+        # self
         for s in range(nmax_fixed):
             pid = idO[i, j, k, s]
             if pid < 0:
                 continue
 
-            exist = False
-            for t in range(S):
-                if act_id[t] == pid:
-                    exist = True
+            val = phiO[i, j, k, s]
+            if val <= pss:
+                continue
+
+            idx = -1
+            for t in range(SR):
+                if rid[t] == pid:
+                    idx = t
                     break
 
-            if (not exist) and (S < nmax_fixed):
-                act_id[S] = pid
-                S += 1
+            if idx < 0:
+                if SR < rmax_fixed:
+                    idx = SR
+                    rid[SR] = pid
+                    rsup[SR] = 0.0
+                    SR += 1
+                else:
+                    continue
 
+            rsup[idx] += val
+
+        # x-
         for s in range(nmax_fixed):
             pid = idO[i - 1, j, k, s]
             if pid < 0:
                 continue
 
-            exist = False
-            for t in range(S):
-                if act_id[t] == pid:
-                    exist = True
+            val = phiO[i - 1, j, k, s]
+            if val <= pss:
+                continue
+
+            idx = -1
+            for t in range(SR):
+                if rid[t] == pid:
+                    idx = t
                     break
 
-            if (not exist) and (S < nmax_fixed):
-                act_id[S] = pid
-                S += 1
+            if idx < 0:
+                if SR < rmax_fixed:
+                    idx = SR
+                    rid[SR] = pid
+                    rsup[SR] = 0.0
+                    SR += 1
+                else:
+                    continue
 
+            rsup[idx] += val
+
+        # x+
         for s in range(nmax_fixed):
             pid = idO[i + 1, j, k, s]
             if pid < 0:
                 continue
 
-            exist = False
-            for t in range(S):
-                if act_id[t] == pid:
-                    exist = True
+            val = phiO[i + 1, j, k, s]
+            if val <= pss:
+                continue
+
+            idx = -1
+            for t in range(SR):
+                if rid[t] == pid:
+                    idx = t
                     break
 
-            if (not exist) and (S < nmax_fixed):
-                act_id[S] = pid
-                S += 1
+            if idx < 0:
+                if SR < rmax_fixed:
+                    idx = SR
+                    rid[SR] = pid
+                    rsup[SR] = 0.0
+                    SR += 1
+                else:
+                    continue
 
+            rsup[idx] += val
+
+        # y-
         for s in range(nmax_fixed):
             pid = idO[i, j - 1, k, s]
             if pid < 0:
                 continue
 
-            exist = False
-            for t in range(S):
-                if act_id[t] == pid:
-                    exist = True
+            val = phiO[i, j - 1, k, s]
+            if val <= pss:
+                continue
+
+            idx = -1
+            for t in range(SR):
+                if rid[t] == pid:
+                    idx = t
                     break
 
-            if (not exist) and (S < nmax_fixed):
-                act_id[S] = pid
-                S += 1
+            if idx < 0:
+                if SR < rmax_fixed:
+                    idx = SR
+                    rid[SR] = pid
+                    rsup[SR] = 0.0
+                    SR += 1
+                else:
+                    continue
 
+            rsup[idx] += val
+
+        # y+
         for s in range(nmax_fixed):
             pid = idO[i, j + 1, k, s]
             if pid < 0:
                 continue
 
-            exist = False
-            for t in range(S):
-                if act_id[t] == pid:
-                    exist = True
+            val = phiO[i, j + 1, k, s]
+            if val <= pss:
+                continue
+
+            idx = -1
+            for t in range(SR):
+                if rid[t] == pid:
+                    idx = t
                     break
 
-            if (not exist) and (S < nmax_fixed):
-                act_id[S] = pid
-                S += 1
+            if idx < 0:
+                if SR < rmax_fixed:
+                    idx = SR
+                    rid[SR] = pid
+                    rsup[SR] = 0.0
+                    SR += 1
+                else:
+                    continue
 
+            rsup[idx] += val
+
+        # z-
         for s in range(nmax_fixed):
             pid = idO[i, j, k - 1, s]
             if pid < 0:
                 continue
 
-            exist = False
-            for t in range(S):
-                if act_id[t] == pid:
-                    exist = True
+            val = phiO[i, j, k - 1, s]
+            if val <= pss:
+                continue
+
+            idx = -1
+            for t in range(SR):
+                if rid[t] == pid:
+                    idx = t
                     break
 
-            if (not exist) and (S < nmax_fixed):
-                act_id[S] = pid
-                S += 1
+            if idx < 0:
+                if SR < rmax_fixed:
+                    idx = SR
+                    rid[SR] = pid
+                    rsup[SR] = 0.0
+                    SR += 1
+                else:
+                    continue
 
+            rsup[idx] += val
+
+        # z+
         for s in range(nmax_fixed):
             pid = idO[i, j, k + 1, s]
             if pid < 0:
                 continue
 
-            exist = False
-            for t in range(S):
-                if act_id[t] == pid:
-                    exist = True
+            val = phiO[i, j, k + 1, s]
+            if val <= pss:
+                continue
+
+            idx = -1
+            for t in range(SR):
+                if rid[t] == pid:
+                    idx = t
                     break
 
-            if (not exist) and (S < nmax_fixed):
-                act_id[S] = pid
-                S += 1
+            if idx < 0:
+                if SR < rmax_fixed:
+                    idx = SR
+                    rid[SR] = pid
+                    rsup[SR] = 0.0
+                    SR += 1
+                else:
+                    continue
 
-        if S <= 0:
+            rsup[idx] += val
+
+        # no R
+        if SR <= 0:
             for s in range(nmax_fixed):
                 phiN[i, j, k, s] = 0.0
                 idN[i, j, k, s] = -1
             return
 
         # ----------------------------------------------------
-        # 1) center phi + lap[a] for active phases
-        #    one slot scan finds all 7 positions
+        # 0.5) build Q from R by support threshold
+        #      3D -> 7*pss
+        #      2D -> 5*pss
+        #      1D -> 3*pss
         # ----------------------------------------------------
-        for a in range(S):
-            pid = act_id[a]
+        if km > 1:
+            qfac = 7.0
+        elif jm > 1:
+            qfac = 5.0
+        else:
+            qfac = 3.0
+
+        qth = qfac * pss
+
+        for a in range(SR):
+            if rsup[a] > qth:
+                if SQ < nmax_fixed:
+                    q_ridx[SQ] = a
+                    SQ += 1
+
+        # no Q
+        if SQ <= 0:
+            for s in range(nmax_fixed):
+                phiN[i, j, k, s] = 0.0
+                idN[i, j, k, s] = -1
+            return
+
+        # ----------------------------------------------------
+        # 1) center phi + lap[r] for R phases
+        # ----------------------------------------------------
+        for a in range(SR):
+            pid = rid[a]
 
             sc = -1
             sxm = -1
@@ -304,77 +433,85 @@ def build_solver_step_kernel(nmax_fixed):
             if szp >= 0:
                 phi_zp = phiO[i, j, k + 1, szp]
 
-            phi_c_arr[a] = phi_c
-            lap[a] = (
+            phi_c_r[a] = phi_c
+            lap_r[a] = (
                 (phi_xp - 2.0 * phi_c + phi_xm) / dx2 +
                 (phi_yp - 2.0 * phi_c + phi_ym) / dy2 +
                 (phi_zp - 2.0 * phi_c + phi_zm) / dz2
             )
 
-        if S <= 1:
+        # if only one R phase, just keep old state
+        if SR <= 1:
             for s in range(nmax_fixed):
                 phiN[i, j, k, s] = phiO[i, j, k, s]
                 idN[i, j, k, s] = idO[i, j, k, s]
             return
 
         # ----------------------------------------------------
-        # 2) dF[a] using active phases only
+        # 2) dF[r] for R
         # ----------------------------------------------------
-        for a in range(S):
+        for a in range(SR):
             val = 0.0
-            for b in range(S):
+            for b in range(SR):
                 if b == a:
                     continue
-                val += 0.5 * (eps * eps) * lap[b] + omg * phi_c_arr[b]
-            dF[a] = val
+                val += 0.5 * (eps * eps) * lap_r[b] + omg * phi_c_r[b]
+            dF_r[a] = val
 
         # ----------------------------------------------------
-        # 3) unique active pair loop (a < b)
+        # 3) rhs[q] using Q x R
         # ----------------------------------------------------
-        for a in range(S):
-            rhs[a] = 0.0
+        for q in range(SQ):
+            rhs_q[q] = 0.0
 
-        for a in range(S):
-            for b in range(a + 1, S):
-                term = mob * (dF[a] - dF[b])
-                rhs[a] += term
-                rhs[b] -= term
+        for q in range(SQ):
+            a = q_ridx[q]   # corresponding R index
+
+            val = 0.0
+            for b in range(SR):
+                if b == a:
+                    continue
+                val += mob * (dF_r[a] - dF_r[b])
+
+            rhs_q[q] = val
 
         # ----------------------------------------------------
-        # 4) update
+        # 4) update for Q only
         # ----------------------------------------------------
-        coef = -2.0 / S
+        coef = -2.0 / SR
 
-        for a in range(S):
-            val = phi_c_arr[a] + dt * coef * rhs[a]
+        for q in range(SQ):
+            a = q_ridx[q]
+            val = phi_c_r[a] + dt * coef * rhs_q[q]
             if val < 0.0:
                 val = 0.0
-            phi_tmp[a] = val
+            phi_tmp_q[q] = val
 
         # ----------------------------------------------------
-        # 5) compact writeback with stronger threshold
+        # 5) compact writeback for Q only
+        #    current version: keep existing pss policy
         # ----------------------------------------------------
         for s in range(nmax_fixed):
             phiN[i, j, k, s] = 0.0
             idN[i, j, k, s] = -1
 
-        pss_kill = 1 * pss
         sum_survive = 0.0
+        for q in range(SQ):
+            if phi_tmp_q[q] > pss:
+                sum_survive += phi_tmp_q[q]
 
-        for a in range(S):
-            if phi_tmp[a] <= pss_kill:
-                phi_tmp[a] = 0.0
-            else:
-                sum_survive += phi_tmp[a]
+        if sum_survive <= 0.0:
+            return
 
         inv = 1.0 / sum_survive
         out_s = 0
 
-        for a in range(S):
-            val = phi_tmp[a]
-            if val > 0.0:
+        for q in range(SQ):
+            val = phi_tmp_q[q]
+            if val > pss:
+                a = q_ridx[q]
                 phiN[i, j, k, out_s] = val * inv
-                idN[i, j, k, out_s] = act_id[a]
+                idN[i, j, k, out_s] = rid[a]
                 out_s += 1
 
     return solver_step_kernel
