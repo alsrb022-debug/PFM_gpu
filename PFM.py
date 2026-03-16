@@ -140,7 +140,6 @@ def build_solver_step_kernel(nmax_fixed):
             rid[s] = -1
             rsup[s] = 0.0
 
-        # q_to_r는 no-Q / writeback에서만 -1 정리가 필요하므로 최소화
         for s in range(nmax_fixed):
             q_to_r[s] = -1
 
@@ -525,7 +524,6 @@ def build_solver_step_kernel(nmax_fixed):
                 out_s += 1
 
     return solver_step_kernel
-
 # ============================================================
 # CUDA PBC kernels
 # works for both phi(float32) and id(int16)
