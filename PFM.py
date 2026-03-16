@@ -104,7 +104,7 @@ def build_solver_step_kernel(nmax_fixed):
         idO, idN,
         im, jm, km,
         dx, dy, dz,
-        dt, pss,
+        dt, pss, qth,
         eps, omg, mob
     ):
         ii, jj, kk = cuda.grid(3)
@@ -334,19 +334,8 @@ def build_solver_step_kernel(nmax_fixed):
 
         # ----------------------------------------------------
         # 0.5) build Q from R by support threshold
-        #      3D -> 7*pss
-        #      2D -> 5*pss
-        #      1D -> 3*pss
+        #      qth is passed from outside
         # ----------------------------------------------------
-        if km > 1:
-            qfac = 7.0
-        elif jm > 1:
-            qfac = 5.0
-        else:
-            qfac = 3.0
-
-        qth = qfac * pss
-
         for a in range(SR):
             if rsup[a] > qth:
                 if SQ < nmax_fixed:
@@ -613,6 +602,14 @@ def solver_step_cuda(phiO_d, phiN_d, idO_d, idN_d, params, solver_kernel):
     dt = params["dt"]
     pss = params["pss"]
 
+    # qth를 커널 밖에서 계산
+    if km > 1:
+        qth = np.float32(7.0 * pss)
+    elif jm > 1:
+        qth = np.float32(5.0 * pss)
+    else:
+        qth = np.float32(3.0 * pss)
+
     eps = np.float32(params["eps"])
     omg = np.float32(params["omg"])
     mob = np.float32(params["mob"])
@@ -629,10 +626,9 @@ def solver_step_cuda(phiO_d, phiN_d, idO_d, idN_d, params, solver_kernel):
         idO_d, idN_d,
         im, jm, km,
         dx, dy, dz,
-        dt, pss,
+        dt, pss, qth,
         eps, omg, mob
     )
-
 
 # ============================================================
 # Prepare
