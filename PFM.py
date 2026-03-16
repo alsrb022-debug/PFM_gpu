@@ -127,9 +127,8 @@ def build_solver_step_kernel(nmax_fixed):
         rsup = cuda.local.array(rmax_fixed, float32)    # support sum for each R
         q_to_r = cuda.local.array(nmax_fixed, int16)    # Q -> R index
 
-        phi_c_r = cuda.local.array(rmax_fixed, float32)
-        lap_r   = cuda.local.array(rmax_fixed, float32)
-        dF_r    = cuda.local.array(rmax_fixed, float32)
+        lap_r = cuda.local.array(rmax_fixed, float32)
+        dF_r  = cuda.local.array(rmax_fixed, float32)
 
         rhs_q     = cuda.local.array(nmax_fixed, float32)
         phi_tmp_q = cuda.local.array(nmax_fixed, float32)
@@ -140,7 +139,6 @@ def build_solver_step_kernel(nmax_fixed):
         for s in range(rmax_fixed):
             rid[s] = -1
             rsup[s] = 0.0
-            phi_c_r[s] = 0.0
             lap_r[s] = 0.0
             dF_r[s] = 0.0
 
@@ -367,7 +365,8 @@ def build_solver_step_kernel(nmax_fixed):
             return
 
         # ----------------------------------------------------
-        # 1) center phi + lap[r] for R phases
+        # 1) lap[r] for R phases
+        #    phi_c is local, not stored
         # ----------------------------------------------------
         for a in range(SR):
             pid = rid[a]
@@ -419,7 +418,6 @@ def build_solver_step_kernel(nmax_fixed):
             if szp >= 0:
                 phi_zp = phiO[i, j, k + 1, szp]
 
-            phi_c_r[a] = phi_c
             lap_r[a] = (
                 (phi_xp - 2.0 * phi_c + phi_xm) / dx2 +
                 (phi_yp - 2.0 * phi_c + phi_ym) / dy2 +
@@ -435,13 +433,28 @@ def build_solver_step_kernel(nmax_fixed):
 
         # ----------------------------------------------------
         # 2) dF[r] for R
+        #    phi_c is computed locally here, not stored
         # ----------------------------------------------------
         for a in range(SR):
             val = 0.0
             for b in range(SR):
                 if b == a:
                     continue
-                val += 0.5 * (eps * eps) * lap_r[b] + omg * phi_c_r[b]
+
+                pid_b = rid[b]
+
+                sc = -1
+                for s in range(nmax_fixed):
+                    if idO[i, j, k, s] == pid_b:
+                        sc = s
+                        break
+
+                phi_c = 0.0
+                if sc >= 0:
+                    phi_c = phiO[i, j, k, sc]
+
+                val += 0.5 * (eps * eps) * lap_r[b] + omg * phi_c
+
             dF_r[a] = val
 
         # ----------------------------------------------------
@@ -463,12 +476,25 @@ def build_solver_step_kernel(nmax_fixed):
 
         # ----------------------------------------------------
         # 4) update for Q only
+        #    phi_c is computed locally here, not stored
         # ----------------------------------------------------
         coef = -2.0 / SR
 
         for q in range(SQ):
             a = q_to_r[q]
-            val = phi_c_r[a] + dt * coef * rhs_q[q]
+            pid_a = rid[a]
+
+            sc = -1
+            for s in range(nmax_fixed):
+                if idO[i, j, k, s] == pid_a:
+                    sc = s
+                    break
+
+            phi_c = 0.0
+            if sc >= 0:
+                phi_c = phiO[i, j, k, sc]
+
+            val = phi_c + dt * coef * rhs_q[q]
             if val < 0.0:
                 val = 0.0
             phi_tmp_q[q] = val
@@ -501,6 +527,9 @@ def build_solver_step_kernel(nmax_fixed):
                 out_s += 1
 
     return solver_step_kernel
+
+
+
 # ============================================================
 # CUDA PBC kernels
 # works for both phi(float32) and id(int16)
