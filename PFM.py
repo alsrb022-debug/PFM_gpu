@@ -130,8 +130,7 @@ def build_solver_step_kernel(nmax_fixed):
         lap_r = cuda.local.array(rmax_fixed, float32)
         dF_r  = cuda.local.array(rmax_fixed, float32)
 
-        rhs_q     = cuda.local.array(nmax_fixed, float32)
-        phi_tmp_q = cuda.local.array(nmax_fixed, float32)
+        rhs_q = cuda.local.array(nmax_fixed, float32)   # rhs -> update value로 재사용
 
         SR = 0
         SQ = 0
@@ -145,7 +144,6 @@ def build_solver_step_kernel(nmax_fixed):
         for s in range(nmax_fixed):
             q_to_r[s] = -1
             rhs_q[s] = 0.0
-            phi_tmp_q[s] = 0.0
 
         # ----------------------------------------------------
         # 0) build R from self + neighbors and accumulate support
@@ -476,7 +474,7 @@ def build_solver_step_kernel(nmax_fixed):
 
         # ----------------------------------------------------
         # 4) update for Q only
-        #    phi_c is computed locally here, not stored
+        #    rhs_q를 update 결과 저장용으로 재사용
         # ----------------------------------------------------
         coef = -2.0 / SR
 
@@ -497,11 +495,12 @@ def build_solver_step_kernel(nmax_fixed):
             val = phi_c + dt * coef * rhs_q[q]
             if val < 0.0:
                 val = 0.0
-            phi_tmp_q[q] = val
+
+            rhs_q[q] = val
 
         # ----------------------------------------------------
         # 5) compact writeback for Q only
-        #    current version: keep existing pss policy
+        #    rhs_q를 phi_tmp_q 대신 사용
         # ----------------------------------------------------
         for s in range(nmax_fixed):
             phiN[i, j, k, s] = 0.0
@@ -509,8 +508,8 @@ def build_solver_step_kernel(nmax_fixed):
 
         sum_survive = 0.0
         for q in range(SQ):
-            if phi_tmp_q[q] > pss:
-                sum_survive += phi_tmp_q[q]
+            if rhs_q[q] > pss:
+                sum_survive += rhs_q[q]
 
         if sum_survive <= 0.0:
             return
@@ -519,7 +518,7 @@ def build_solver_step_kernel(nmax_fixed):
         out_s = 0
 
         for q in range(SQ):
-            val = phi_tmp_q[q]
+            val = rhs_q[q]
             if val > pss:
                 a = q_to_r[q]
                 phiN[i, j, k, out_s] = val * inv
@@ -527,7 +526,6 @@ def build_solver_step_kernel(nmax_fixed):
                 out_s += 1
 
     return solver_step_kernel
-
 
 
 # ============================================================
