@@ -135,15 +135,14 @@ def build_solver_step_kernel(nmax_fixed):
         SR = 0
         SQ = 0
 
+        # 꼭 필요한 최소 초기화만 수행
         for s in range(rmax_fixed):
             rid[s] = -1
             rsup[s] = 0.0
-            lap_r[s] = 0.0
-            dF_r[s] = 0.0
 
+        # q_to_r는 no-Q / writeback에서만 -1 정리가 필요하므로 최소화
         for s in range(nmax_fixed):
             q_to_r[s] = -1
-            rhs_q[s] = 0.0
 
         # ----------------------------------------------------
         # 0) build R from self + neighbors and accumulate support
@@ -362,6 +361,13 @@ def build_solver_step_kernel(nmax_fixed):
                 idN[i, j, k, s] = -1
             return
 
+        # if only one R phase, just keep old state
+        if SR <= 1:
+            for s in range(nmax_fixed):
+                phiN[i, j, k, s] = phiO[i, j, k, s]
+                idN[i, j, k, s] = idO[i, j, k, s]
+            return
+
         # ----------------------------------------------------
         # 1) lap[r] for R phases
         #    phi_c is local, not stored
@@ -421,13 +427,6 @@ def build_solver_step_kernel(nmax_fixed):
                 (phi_yp - 2.0 * phi_c + phi_ym) / dy2 +
                 (phi_zp - 2.0 * phi_c + phi_zm) / dz2
             )
-
-        # if only one R phase, just keep old state
-        if SR <= 1:
-            for s in range(nmax_fixed):
-                phiN[i, j, k, s] = phiO[i, j, k, s]
-                idN[i, j, k, s] = idO[i, j, k, s]
-            return
 
         # ----------------------------------------------------
         # 2) dF[r] for R
@@ -526,7 +525,6 @@ def build_solver_step_kernel(nmax_fixed):
                 out_s += 1
 
     return solver_step_kernel
-
 
 # ============================================================
 # CUDA PBC kernels
