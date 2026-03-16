@@ -70,16 +70,16 @@ def run(input_path="input.txt", out_dir="pout"):
             phi_save_host = phiO_d.copy_to_host()
             id_save_host = idO_d.copy_to_host()
 
-            write_snapshot(
-                phi_save_host,
-                id_save_host,
-                params["im"],
-                params["jm"],
-                params["km"],
-                params["out_dir"],
-                step,
-                sim_time,
-            )
+#            write_snapshot(
+#                phi_save_host,
+#                id_save_host,
+#                params["im"],
+#                params["jm"],
+#                params["km"],
+#                params["out_dir"],
+#                step,
+#                sim_time,
+#            )
 
             elapsed = time.perf_counter() - t0
             print(f"step = {step:8d}, time = {sim_time:.6e}, gpu_time = {elapsed:.3f} s")
@@ -125,13 +125,13 @@ def build_solver_step_kernel(nmax_fixed):
         # -----------------------------
         rid = cuda.local.array(rmax_fixed, int16)       # R phase ids
         rsup = cuda.local.array(rmax_fixed, float32)    # support sum for each R
-        q_ridx = cuda.local.array(nmax_fixed, int16)    # Q is stored as index into R
+        q_to_r = cuda.local.array(nmax_fixed, int16)    # Q -> R index
 
         phi_c_r = cuda.local.array(rmax_fixed, float32)
         lap_r   = cuda.local.array(rmax_fixed, float32)
         dF_r    = cuda.local.array(rmax_fixed, float32)
 
-        rhs_q    = cuda.local.array(nmax_fixed, float32)
+        rhs_q     = cuda.local.array(nmax_fixed, float32)
         phi_tmp_q = cuda.local.array(nmax_fixed, float32)
 
         SR = 0
@@ -145,15 +145,15 @@ def build_solver_step_kernel(nmax_fixed):
             dF_r[s] = 0.0
 
         for s in range(nmax_fixed):
-            q_ridx[s] = -1
+            q_to_r[s] = -1
             rhs_q[s] = 0.0
             phi_tmp_q[s] = 0.0
 
         # ----------------------------------------------------
         # 0) build R from self + neighbors and accumulate support
-        #    current safe version:
+        #    sparse-slot rule:
         #      - pid < 0 => skip
-        #      - val <= pss => skip
+        #      - no val <= pss check here
         # ----------------------------------------------------
 
         # self
@@ -163,8 +163,6 @@ def build_solver_step_kernel(nmax_fixed):
                 continue
 
             val = phiO[i, j, k, s]
-            if val <= pss:
-                continue
 
             idx = -1
             for t in range(SR):
@@ -190,8 +188,6 @@ def build_solver_step_kernel(nmax_fixed):
                 continue
 
             val = phiO[i - 1, j, k, s]
-            if val <= pss:
-                continue
 
             idx = -1
             for t in range(SR):
@@ -217,8 +213,6 @@ def build_solver_step_kernel(nmax_fixed):
                 continue
 
             val = phiO[i + 1, j, k, s]
-            if val <= pss:
-                continue
 
             idx = -1
             for t in range(SR):
@@ -244,8 +238,6 @@ def build_solver_step_kernel(nmax_fixed):
                 continue
 
             val = phiO[i, j - 1, k, s]
-            if val <= pss:
-                continue
 
             idx = -1
             for t in range(SR):
@@ -271,8 +263,6 @@ def build_solver_step_kernel(nmax_fixed):
                 continue
 
             val = phiO[i, j + 1, k, s]
-            if val <= pss:
-                continue
 
             idx = -1
             for t in range(SR):
@@ -298,8 +288,6 @@ def build_solver_step_kernel(nmax_fixed):
                 continue
 
             val = phiO[i, j, k - 1, s]
-            if val <= pss:
-                continue
 
             idx = -1
             for t in range(SR):
@@ -325,8 +313,6 @@ def build_solver_step_kernel(nmax_fixed):
                 continue
 
             val = phiO[i, j, k + 1, s]
-            if val <= pss:
-                continue
 
             idx = -1
             for t in range(SR):
@@ -370,7 +356,7 @@ def build_solver_step_kernel(nmax_fixed):
         for a in range(SR):
             if rsup[a] > qth:
                 if SQ < nmax_fixed:
-                    q_ridx[SQ] = a
+                    q_to_r[SQ] = a
                     SQ += 1
 
         # no Q
@@ -465,7 +451,7 @@ def build_solver_step_kernel(nmax_fixed):
             rhs_q[q] = 0.0
 
         for q in range(SQ):
-            a = q_ridx[q]   # corresponding R index
+            a = q_to_r[q]
 
             val = 0.0
             for b in range(SR):
@@ -481,7 +467,7 @@ def build_solver_step_kernel(nmax_fixed):
         coef = -2.0 / SR
 
         for q in range(SQ):
-            a = q_ridx[q]
+            a = q_to_r[q]
             val = phi_c_r[a] + dt * coef * rhs_q[q]
             if val < 0.0:
                 val = 0.0
@@ -509,13 +495,12 @@ def build_solver_step_kernel(nmax_fixed):
         for q in range(SQ):
             val = phi_tmp_q[q]
             if val > pss:
-                a = q_ridx[q]
+                a = q_to_r[q]
                 phiN[i, j, k, out_s] = val * inv
                 idN[i, j, k, out_s] = rid[a]
                 out_s += 1
 
     return solver_step_kernel
-
 # ============================================================
 # CUDA PBC kernels
 # works for both phi(float32) and id(int16)
