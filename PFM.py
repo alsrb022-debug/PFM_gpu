@@ -89,8 +89,8 @@ def run(input_path="input.txt", out_dir="pout"):
             idO_d, idN_d = idN_d, idO_d
 
         if step % params["nout"] == 0:
-            phi_save_host = phiO_d.copy_to_host()
-            id_save_host = idO_d.copy_to_host()
+#            phi_save_host = phiO_d.copy_to_host()
+#            id_save_host = idO_d.copy_to_host()
 
 #            write_snapshot(
 #                phi_save_host,
