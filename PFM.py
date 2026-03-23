@@ -24,6 +24,30 @@ except Exception:
 
 
 # ============================================================
+# CUDA device helpers
+# ============================================================
+if CUDA_OK:
+    @cuda.jit(device=True)
+    def append_active_from_cell(act_id, S, idO, ii, jj, kk, nmax_fixed):
+        for s in range(nmax_fixed):
+            pid = idO[ii, jj, kk, s]
+            if pid < 0:
+                continue
+
+            exist = False
+            for t in range(S):
+                if act_id[t] == pid:
+                    exist = True
+                    break
+
+            if (not exist) and (S < nmax_fixed):
+                act_id[S] = pid
+                S += 1
+
+        return S
+
+
+# ============================================================
 # Main
 # ============================================================
 def run(input_path="input.txt", out_dir="pout"):
@@ -36,7 +60,7 @@ def run(input_path="input.txt", out_dir="pout"):
     initialize_fields_from_params(phiN, idN, params)
     copy_initial_state(phiO, phiN, idO, idN)
 
-    solver_kernel = build_solver_step_kernel(params["nmax"])
+    step_kernel = build_solver_step_kernel(params["nmax"])
     bc_kernels = build_apply_bc_kernels()
 
     phiO_d = cuda.to_device(phiO)
@@ -50,17 +74,15 @@ def run(input_path="input.txt", out_dir="pout"):
     print("CUDA enabled = True")
 
     t0 = time.perf_counter()
-
     sim_time = 0.0
     dt = params["dt"]
 
     for step in range(params["nstep"] + 1):
         if step > 0:
-            # phi / id 둘 다 ghost 갱신 필요
             apply_bc_cuda(phiO_d, params, bc_kernels)
             apply_bc_cuda(idO_d, params, bc_kernels)
 
-            solver_step_cuda(phiO_d, phiN_d, idO_d, idN_d, params, solver_kernel)
+            solver_step_cuda(phiO_d, phiN_d, idO_d, idN_d, params, step_kernel)
             cuda.synchronize()
 
             phiO_d, phiN_d = phiN_d, phiO_d
@@ -96,15 +118,13 @@ def build_solver_step_kernel(nmax_fixed):
     if not CUDA_OK:
         return None
 
-    rmax_fixed = nmax_fixed * 2   # 테스트용 R 최대 개수
-
     @cuda.jit
     def solver_step_kernel(
         phiO, phiN,
         idO, idN,
         im, jm, km,
         dx, dy, dz,
-        dt, pss, qth,
+        dt, pss,
         eps, omg, mob
     ):
         ii, jj, kk = cuda.grid(3)
@@ -120,248 +140,50 @@ def build_solver_step_kernel(nmax_fixed):
         dy2 = dy * dy
         dz2 = dz * dz
 
-        # -----------------------------
-        # R / Q arrays
-        # -----------------------------
-        rid = cuda.local.array(rmax_fixed, int16)       # R phase ids
-        rsup = cuda.local.array(rmax_fixed, float32)    # support sum for each R
-        q_to_r = cuda.local.array(nmax_fixed, int16)    # Q -> R index
+        act_id = cuda.local.array(nmax_fixed, int16)
 
-        lap_r = cuda.local.array(rmax_fixed, float32)
-        dF_r  = cuda.local.array(rmax_fixed, float32)
+        phiC = cuda.local.array(nmax_fixed, float32)
+        lap = cuda.local.array(nmax_fixed, float32)
+        df = cuda.local.array(nmax_fixed, float32)
+        rhs = cuda.local.array(nmax_fixed, float32)
+        phi_tmp = cuda.local.array(nmax_fixed, float32)
 
-        rhs_q = cuda.local.array(nmax_fixed, float32)   # rhs -> update value로 재사용
-
-        SR = 0
-        SQ = 0
-
-        # 꼭 필요한 최소 초기화만 수행
-        for s in range(rmax_fixed):
-            rid[s] = -1
-            rsup[s] = 0.0
-
-        for s in range(nmax_fixed):
-            q_to_r[s] = -1
+        S = 0
 
         # ----------------------------------------------------
-        # 0) build R from self + neighbors and accumulate support
-        #    sparse-slot rule:
-        #      - pid < 0 => skip
-        #      - no val <= pss check here
+        # 0) local buffers init
         # ----------------------------------------------------
-
-        # self
         for s in range(nmax_fixed):
-            pid = idO[i, j, k, s]
-            if pid < 0:
-                continue
+            act_id[s] = -1
+            phiC[s] = 0.0
+            lap[s] = 0.0
+            df[s] = 0.0
+            rhs[s] = 0.0
+            phi_tmp[s] = 0.0
 
-            val = phiO[i, j, k, s]
+        # ----------------------------------------------------
+        # 1) active phase ids collection from self + 6 neighbors
+        # ----------------------------------------------------
+        S = append_active_from_cell(act_id, S, idO, i,     j,     k,     nmax_fixed)
+        S = append_active_from_cell(act_id, S, idO, i - 1, j,     k,     nmax_fixed)
+        S = append_active_from_cell(act_id, S, idO, i + 1, j,     k,     nmax_fixed)
+        S = append_active_from_cell(act_id, S, idO, i,     j - 1, k,     nmax_fixed)
+        S = append_active_from_cell(act_id, S, idO, i,     j + 1, k,     nmax_fixed)
+        S = append_active_from_cell(act_id, S, idO, i,     j,     k - 1, nmax_fixed)
+        S = append_active_from_cell(act_id, S, idO, i,     j,     k + 1, nmax_fixed)
 
-            idx = -1
-            for t in range(SR):
-                if rid[t] == pid:
-                    idx = t
-                    break
-
-            if idx < 0:
-                if SR < rmax_fixed:
-                    idx = SR
-                    rid[SR] = pid
-                    rsup[SR] = 0.0
-                    SR += 1
-                else:
-                    continue
-
-            rsup[idx] += val
-
-        # x-
-        for s in range(nmax_fixed):
-            pid = idO[i - 1, j, k, s]
-            if pid < 0:
-                continue
-
-            val = phiO[i - 1, j, k, s]
-
-            idx = -1
-            for t in range(SR):
-                if rid[t] == pid:
-                    idx = t
-                    break
-
-            if idx < 0:
-                if SR < rmax_fixed:
-                    idx = SR
-                    rid[SR] = pid
-                    rsup[SR] = 0.0
-                    SR += 1
-                else:
-                    continue
-
-            rsup[idx] += val
-
-        # x+
-        for s in range(nmax_fixed):
-            pid = idO[i + 1, j, k, s]
-            if pid < 0:
-                continue
-
-            val = phiO[i + 1, j, k, s]
-
-            idx = -1
-            for t in range(SR):
-                if rid[t] == pid:
-                    idx = t
-                    break
-
-            if idx < 0:
-                if SR < rmax_fixed:
-                    idx = SR
-                    rid[SR] = pid
-                    rsup[SR] = 0.0
-                    SR += 1
-                else:
-                    continue
-
-            rsup[idx] += val
-
-        # y-
-        for s in range(nmax_fixed):
-            pid = idO[i, j - 1, k, s]
-            if pid < 0:
-                continue
-
-            val = phiO[i, j - 1, k, s]
-
-            idx = -1
-            for t in range(SR):
-                if rid[t] == pid:
-                    idx = t
-                    break
-
-            if idx < 0:
-                if SR < rmax_fixed:
-                    idx = SR
-                    rid[SR] = pid
-                    rsup[SR] = 0.0
-                    SR += 1
-                else:
-                    continue
-
-            rsup[idx] += val
-
-        # y+
-        for s in range(nmax_fixed):
-            pid = idO[i, j + 1, k, s]
-            if pid < 0:
-                continue
-
-            val = phiO[i, j + 1, k, s]
-
-            idx = -1
-            for t in range(SR):
-                if rid[t] == pid:
-                    idx = t
-                    break
-
-            if idx < 0:
-                if SR < rmax_fixed:
-                    idx = SR
-                    rid[SR] = pid
-                    rsup[SR] = 0.0
-                    SR += 1
-                else:
-                    continue
-
-            rsup[idx] += val
-
-        # z-
-        for s in range(nmax_fixed):
-            pid = idO[i, j, k - 1, s]
-            if pid < 0:
-                continue
-
-            val = phiO[i, j, k - 1, s]
-
-            idx = -1
-            for t in range(SR):
-                if rid[t] == pid:
-                    idx = t
-                    break
-
-            if idx < 0:
-                if SR < rmax_fixed:
-                    idx = SR
-                    rid[SR] = pid
-                    rsup[SR] = 0.0
-                    SR += 1
-                else:
-                    continue
-
-            rsup[idx] += val
-
-        # z+
-        for s in range(nmax_fixed):
-            pid = idO[i, j, k + 1, s]
-            if pid < 0:
-                continue
-
-            val = phiO[i, j, k + 1, s]
-
-            idx = -1
-            for t in range(SR):
-                if rid[t] == pid:
-                    idx = t
-                    break
-
-            if idx < 0:
-                if SR < rmax_fixed:
-                    idx = SR
-                    rid[SR] = pid
-                    rsup[SR] = 0.0
-                    SR += 1
-                else:
-                    continue
-
-            rsup[idx] += val
-
-        # no R
-        if SR <= 0:
+        if S <= 0:
             for s in range(nmax_fixed):
                 phiN[i, j, k, s] = 0.0
                 idN[i, j, k, s] = -1
             return
 
         # ----------------------------------------------------
-        # 0.5) build Q from R by support threshold
-        #      qth is passed from outside
+        # 2) center phi + lap[a] for active phases
+        #    one slot scan finds all 7 positions
         # ----------------------------------------------------
-        for a in range(SR):
-            if rsup[a] > qth:
-                if SQ < nmax_fixed:
-                    q_to_r[SQ] = a
-                    SQ += 1
-
-        # no Q
-        if SQ <= 0:
-            for s in range(nmax_fixed):
-                phiN[i, j, k, s] = 0.0
-                idN[i, j, k, s] = -1
-            return
-
-        # if only one R phase, just keep old state
-        if SR <= 1:
-            for s in range(nmax_fixed):
-                phiN[i, j, k, s] = phiO[i, j, k, s]
-                idN[i, j, k, s] = idO[i, j, k, s]
-            return
-
-        # ----------------------------------------------------
-        # 1) lap[r] for R phases
-        #    phi_c is local, not stored
-        # ----------------------------------------------------
-        for a in range(SR):
-            pid = rid[a]
+        for a in range(S):
+            pid = act_id[a]
 
             sc = -1
             sxm = -1
@@ -387,132 +209,120 @@ def build_solver_step_kernel(nmax_fixed):
                 if szp < 0 and idO[i, j, k + 1, s] == pid:
                     szp = s
 
-            phi_c = 0.0
-            phi_xm = 0.0
-            phi_xp = 0.0
-            phi_ym = 0.0
-            phi_yp = 0.0
-            phi_zm = 0.0
-            phi_zp = 0.0
+            pc = 0.0
+            pxm = 0.0
+            pxp = 0.0
+            pym = 0.0
+            pyp = 0.0
+            pzm = 0.0
+            pzp = 0.0
 
             if sc >= 0:
-                phi_c = phiO[i, j, k, sc]
+                pc = phiO[i, j, k, sc]
             if sxm >= 0:
-                phi_xm = phiO[i - 1, j, k, sxm]
+                pxm = phiO[i - 1, j, k, sxm]
             if sxp >= 0:
-                phi_xp = phiO[i + 1, j, k, sxp]
+                pxp = phiO[i + 1, j, k, sxp]
             if sym >= 0:
-                phi_ym = phiO[i, j - 1, k, sym]
+                pym = phiO[i, j - 1, k, sym]
             if syp >= 0:
-                phi_yp = phiO[i, j + 1, k, syp]
+                pyp = phiO[i, j + 1, k, syp]
             if szm >= 0:
-                phi_zm = phiO[i, j, k - 1, szm]
+                pzm = phiO[i, j, k - 1, szm]
             if szp >= 0:
-                phi_zp = phiO[i, j, k + 1, szp]
+                pzp = phiO[i, j, k + 1, szp]
 
-            lap_r[a] = (
-                (phi_xp - 2.0 * phi_c + phi_xm) / dx2 +
-                (phi_yp - 2.0 * phi_c + phi_ym) / dy2 +
-                (phi_zp - 2.0 * phi_c + phi_zm) / dz2
+            phiC[a] = pc
+            lap[a] = (
+                (pxp - 2.0 * pc + pxm) / dx2 +
+                (pyp - 2.0 * pc + pym) / dy2 +
+                (pzp - 2.0 * pc + pzm) / dz2
             )
 
-        # ----------------------------------------------------
-        # 2) dF[r] for R
-        #    phi_c is computed locally here, not stored
-        # ----------------------------------------------------
-        for a in range(SR):
-            val = 0.0
-            for b in range(SR):
-                if b == a:
-                    continue
-
-                pid_b = rid[b]
-
-                sc = -1
-                for s in range(nmax_fixed):
-                    if idO[i, j, k, s] == pid_b:
-                        sc = s
-                        break
-
-                phi_c = 0.0
-                if sc >= 0:
-                    phi_c = phiO[i, j, k, sc]
-
-                val += 0.5 * (eps * eps) * lap_r[b] + omg * phi_c
-
-            dF_r[a] = val
-
-        # ----------------------------------------------------
-        # 3) rhs[q] using Q x R
-        # ----------------------------------------------------
-        for q in range(SQ):
-            rhs_q[q] = 0.0
-
-        for q in range(SQ):
-            a = q_to_r[q]
-
-            val = 0.0
-            for b in range(SR):
-                if b == a:
-                    continue
-                val += mob * (dF_r[a] - dF_r[b])
-
-            rhs_q[q] = val
-
-        # ----------------------------------------------------
-        # 4) update for Q only
-        #    rhs_q를 update 결과 저장용으로 재사용
-        # ----------------------------------------------------
-        coef = -2.0 / SR
-
-        for q in range(SQ):
-            a = q_to_r[q]
-            pid_a = rid[a]
-
-            sc = -1
+        if S <= 1:
             for s in range(nmax_fixed):
-                if idO[i, j, k, s] == pid_a:
-                    sc = s
-                    break
+                phiN[i, j, k, s] = phiO[i, j, k, s]
+                idN[i, j, k, s] = idO[i, j, k, s]
+            return
 
-            phi_c = 0.0
-            if sc >= 0:
-                phi_c = phiO[i, j, k, sc]
+        # ----------------------------------------------------
+        # 3) solver core: df + rhs
+        # ----------------------------------------------------
+        for a in range(S):
+            val = 0.0
+            for b in range(S):
+                if b == a:
+                    continue
+                val += 0.5 * (eps * eps) * lap[b] + omg * phiC[b]
+            df[a] = val
 
-            val = phi_c + dt * coef * rhs_q[q]
+        for a in range(S):
+            rhs[a] = 0.0
+
+        for a in range(S):
+            for b in range(a + 1, S):
+                term = mob * (df[a] - df[b])
+                rhs[a] += term
+                rhs[b] -= term
+
+        # ----------------------------------------------------
+        # 4) update + normalize + compact writeback
+        # ----------------------------------------------------
+        coef = -2.0 / S
+
+        for a in range(S):
+            val = phiC[a] + dt * coef * rhs[a]
             if val < 0.0:
                 val = 0.0
+            phi_tmp[a] = val
 
-            rhs_q[q] = val
-
-        # ----------------------------------------------------
-        # 5) compact writeback for Q only
-        #    rhs_q를 phi_tmp_q 대신 사용
-        # ----------------------------------------------------
         for s in range(nmax_fixed):
             phiN[i, j, k, s] = 0.0
             idN[i, j, k, s] = -1
 
         sum_survive = 0.0
-        for q in range(SQ):
-            if rhs_q[q] > pss:
-                sum_survive += rhs_q[q]
+        cnt_survive = 0
+        amax = 0
+        vmax = -1.0
 
-        if sum_survive <= 0.0:
-            return
+        for a in range(S):
+            val = phi_tmp[a]
 
-        inv = 1.0 / sum_survive
-        out_s = 0
+            if val > vmax:
+                vmax = val
+                amax = a
 
-        for q in range(SQ):
-            val = rhs_q[q]
             if val > pss:
-                a = q_to_r[q]
-                phiN[i, j, k, out_s] = val * inv
-                idN[i, j, k, out_s] = rid[a]
-                out_s += 1
+                sum_survive += val
+                cnt_survive += 1
+
+        if cnt_survive > 0 and sum_survive > 0.0:
+            inv = 1.0 / sum_survive
+            out_s = 0
+
+            for a in range(S):
+                val = phi_tmp[a]
+                if val > pss:
+                    if out_s < nmax_fixed:
+                        phiN[i, j, k, out_s] = val * inv
+                        idN[i, j, k, out_s] = act_id[a]
+                        out_s += 1
+        else:
+#            phiN[i, j, k, 0] = 1.0
+#            idN[i, j, k, 0] = act_id[amax]
+
+            print("ERROR: no surviving phase at", i, j, k, "S=", S)
+
+            for a in range(S):
+                print("phi_tmp", a, phi_tmp[a])
+
+            for s in range(nmax_fixed):
+                phiN[i, j, k, s] = 0.0
+                idN[i, j, k, s] = -1
 
     return solver_step_kernel
+
+
 # ============================================================
 # CUDA PBC kernels
 # works for both phi(float32) and id(int16)
@@ -602,14 +412,6 @@ def solver_step_cuda(phiO_d, phiN_d, idO_d, idN_d, params, solver_kernel):
     dt = params["dt"]
     pss = params["pss"]
 
-    # qth를 커널 밖에서 계산
-    if km > 1:
-        qth = np.float32(7.0 * pss)
-    elif jm > 1:
-        qth = np.float32(5.0 * pss)
-    else:
-        qth = np.float32(3.0 * pss)
-
     eps = np.float32(params["eps"])
     omg = np.float32(params["omg"])
     mob = np.float32(params["mob"])
@@ -626,9 +428,10 @@ def solver_step_cuda(phiO_d, phiN_d, idO_d, idN_d, params, solver_kernel):
         idO_d, idN_d,
         im, jm, km,
         dx, dy, dz,
-        dt, pss, qth,
+        dt, pss,
         eps, omg, mob
     )
+
 
 # ============================================================
 # Prepare

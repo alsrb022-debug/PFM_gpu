@@ -9,7 +9,7 @@ dy = 1e-6
 dz = 1e-6
 
 [pf]
-nmax  = 2
+nmax  = 5
 nph   = 256
 emob  = 1.0
 sigma = 0.2
