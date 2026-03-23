@@ -3,13 +3,13 @@ im = 256
 jm = 256
 km = 256
 
-[grid]  # [m]
+[grid]  
 dx = 1e-6
 dy = 1e-6
 dz = 1e-6
 
 [pf]
-nmax  = 5
+nmax  = 2
 nph   = 256
 emob  = 1.0
 sigma = 0.2
@@ -22,7 +22,7 @@ nstep = 2000
 nout  = 2000
 
 [init]  # plane triple circle sphere neighbors voronoi
-type   = voronoi
+type   = sphere
 radius = 50
 seed   = 1234
 
